@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔏 pq-sign
+<a href="https://github.com/effjy/pq-sign/"><img src="titles/pq-sign-title.svg" height="44" alt="PQ-SIGN"></a>
 
 **Post-quantum detached file signing for Linux.**
 
