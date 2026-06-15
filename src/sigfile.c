@@ -66,43 +66,47 @@ uint8_t *sigfile_build(const char *alg, const uint8_t *pubkey,
     return buf;
 }
 
-void sigfile_parse(const uint8_t *buf, size_t len, pqsign_sigfile *out)
+bool sigfile_parse(const uint8_t *buf, size_t len, pqsign_sigfile *out)
 {
+    /* Input is attacker-controlled: validate every field and never abort.
+     * Bounds are written as `field > len - o` (not `o + field > len`) so the
+     * arithmetic cannot overflow, since each check keeps `o <= len`. */
     size_t o = 0;
     if (len < 6 + 2 + 2 || memcmp(buf, MAGIC, 6) != 0)
-        die("not a pq-sign signature file");
+        return false;                     /* not a pq-sign signature file */
     o += 6;
 
     uint8_t vmaj = buf[o++];
-    uint8_t vmin = buf[o++];
+    o++;                                  /* minor version: accepted as-is */
     if (vmaj != VER_MAJOR)
-        die("unsupported signature version %u.%u", vmaj, vmin);
+        return false;                     /* unsupported major version    */
 
-    if (o + 2 > len)
-        die("truncated signature (alg length)");
+    if (len - o < 2)
+        return false;                     /* truncated (alg length)       */
     uint16_t alg_len = get_u16(buf + o);
     o += 2;
-    if (alg_len == 0 || alg_len >= sizeof out->alg || o + alg_len > len)
-        die("invalid algorithm field in signature");
+    if (alg_len == 0 || alg_len >= sizeof out->alg || alg_len > len - o)
+        return false;                     /* invalid algorithm field      */
     memcpy(out->alg, buf + o, alg_len);
     out->alg[alg_len] = '\0';
     o += alg_len;
 
-    if (o + 32 > len)
-        die("truncated signature (fingerprint)");
+    if (len - o < 32)
+        return false;                     /* truncated (fingerprint)      */
     memcpy(out->pub_fpr, buf + o, 32);
     o += 32;
 
-    if (o + 4 > len)
-        die("truncated signature (sig length)");
+    if (len - o < 4)
+        return false;                     /* truncated (sig length)       */
     uint32_t sig_len = get_u32(buf + o);
     o += 4;
-    if (o + sig_len != len)
-        die("signature length mismatch (trailing or missing bytes)");
+    if (sig_len != len - o)
+        return false;                     /* trailing or missing bytes    */
 
     out->sig = buf + o;
     out->sig_len = sig_len;
     out->raw = NULL;   /* set by caller if it owns `buf` */
+    return true;
 }
 
 void sigfile_free(pqsign_sigfile *s)

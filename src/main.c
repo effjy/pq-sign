@@ -102,7 +102,7 @@ static int cmd_keygen(int argc, char **argv)
         die("keygen: failed to initialise %s", canon);
 
     uint8_t *pub = xmalloc(sig->length_public_key);
-    uint8_t *sec = xmalloc(sig->length_secret_key);
+    uint8_t *sec = secure_alloc(sig->length_secret_key);
     if (OQS_SIG_keypair(sig, pub, sec) != OQS_SUCCESS)
         die("keygen: key generation failed");
 
@@ -115,7 +115,8 @@ static int cmd_keygen(int argc, char **argv)
     snprintf(secpath, sizeof secpath, "%s.key", out);
 
     key_write_public(pubpath, canon, pub, sig->length_public_key);
-    key_write_secret(secpath, canon, sec, sig->length_secret_key, pass);
+    key_write_secret(secpath, canon, sec, sig->length_secret_key,
+                     pub, sig->length_public_key, pass);
 
     uint8_t fpr[32];
     char fprhex[65];
@@ -132,8 +133,7 @@ static int cmd_keygen(int argc, char **argv)
         secure_wipe(pass, strlen(pass));
         free(pass);
     }
-    secure_wipe(sec, sig->length_secret_key);
-    free(sec);
+    secure_free(sec, sig->length_secret_key);
     free(pub);
     OQS_SIG_free(sig);
     return 0;
@@ -171,9 +171,13 @@ static int cmd_sign(int argc, char **argv)
     if (sk.key_len != sig->length_secret_key)
         die("sign: secret key size mismatch for %s", sk.alg);
 
-    /* Recover the matching public key so the signature can embed its
-     * fingerprint. liboqs keeps the public key inside the secret key for
-     * these schemes, but we re-derive the fingerprint from a clean copy. */
+    /* The signer's public key is embedded in the secret-key file, so the
+     * signature can always carry the signer fingerprint — no companion
+     * file lookup, no empty-fingerprint fallback. */
+    if (!sk.pub || sk.pub_len != sig->length_public_key)
+        die("sign: '%s' has no valid embedded public key; "
+            "regenerate it with pq-sign %s", keypath, PQSIGN_VERSION);
+
     uint8_t msg[32];
     signed_message(file, msg);
 
@@ -183,37 +187,8 @@ static int cmd_sign(int argc, char **argv)
         != OQS_SUCCESS)
         die("sign: signing failed");
 
-    /* For the embedded fingerprint we need the public key. Load the
-     * companion .pub if present; otherwise warn and store a zero fpr. */
-    uint8_t pub_fpr_src_present = 0;
-    uint8_t *pub = NULL;
-    size_t pub_len = 0;
-    char pubguess[4096];
-    /* alice.key -> alice.pub */
-    snprintf(pubguess, sizeof pubguess, "%s", keypath);
-    char *dot = strrchr(pubguess, '.');
-    if (dot && strcmp(dot, ".key") == 0) {
-        strcpy(dot, ".pub");
-        FILE *t = fopen(pubguess, "rb");
-        if (t) {
-            fclose(t);
-            pqsign_key pk = {0};
-            key_load(pubguess, &pk);
-            pub = pk.key;
-            pub_len = pk.key_len;
-            pub_fpr_src_present = 1;
-            /* keep pk.key alive in `pub`; do not key_free yet */
-        }
-    }
-    if (!pub_fpr_src_present) {
-        warn("companion public key not found next to '%s';"
-             " signature fingerprint will be empty", keypath);
-        pub = xcalloc(sig->length_public_key, 1);
-        pub_len = sig->length_public_key;
-    }
-
     size_t blob_len = 0;
-    uint8_t *blob = sigfile_build(sk.alg, pub, pub_len, signature, siglen,
+    uint8_t *blob = sigfile_build(sk.alg, sk.pub, sk.pub_len, signature, siglen,
                                   &blob_len);
 
     char outpath[4096];
@@ -227,7 +202,6 @@ static int cmd_sign(int argc, char **argv)
     printf("  signature: %s (%zu bytes)\n", outpath, siglen);
 
     free(blob);
-    free(pub);
     secure_wipe(signature, sig->length_signature);
     free(signature);
     OQS_SIG_free(sig);
@@ -270,19 +244,20 @@ static int cmd_verify(int argc, char **argv)
     size_t blob_len;
     uint8_t *blob = read_file(sigpath, &blob_len);
     pqsign_sigfile sf;
-    sigfile_parse(blob, blob_len, &sf);
+    if (!sigfile_parse(blob, blob_len, &sf)) {
+        free(blob);
+        die("verify: '%s' is not a valid pq-sign signature", sigpath);
+    }
     sf.raw = blob;
 
     if (strcmp(sf.alg, pk.alg) != 0)
         die("verify: signature is %s but key is %s", sf.alg, pk.alg);
 
-    /* Confirm the signature was made for *this* public key. */
+    /* Confirm the signature was made for *this* public key. v1.0 signatures
+     * always carry a real fingerprint, so this binding is mandatory. */
     uint8_t fpr[32];
     sha256(pk.key, pk.key_len, fpr);
-    bool fpr_set = false;
-    for (int i = 0; i < 32; i++)
-        if (sf.pub_fpr[i]) { fpr_set = true; break; }
-    if (fpr_set && !ct_equal(fpr, sf.pub_fpr, 32)) {
+    if (!ct_equal(fpr, sf.pub_fpr, 32)) {
         printf("VERIFY FAILED: signature was made for a different key\n");
         sigfile_free(&sf);
         key_free(&pk);
