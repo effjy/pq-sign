@@ -34,14 +34,17 @@ self-describing on the wire, no surprises.
 - 🛡️ **Two NIST standards** — lattice-based **ML-DSA** (fast, compact) and
   hash-based **SLH-DSA** (conservative, larger signatures).
 - 📎 **Detached signatures** — a self-describing `.sig` blob carries the scheme
-  and a fingerprint of the signing key, so `verify` needs no extra flags.
+  and a fingerprint of the signing key, so `verify` needs no extra flags. The
+  secret key embeds its public key, so every signature is bound to its signer
+  and `verify` rejects a wrong-key signature before running the math.
 - 🔐 **Encrypted secret keys** — `--encrypt` wraps the private key with
-  **Argon2id** (64&nbsp;MiB, t=3) and **AES-256-GCM**. The passphrase never
-  touches disk.
+  **Argon2id** (64&nbsp;MiB, t=3) and **AES-256-GCM**, with the algorithm and
+  public key bound in as AEAD. The passphrase never touches disk.
 - 🌊 **Streaming hash** — files are signed over a domain-separated SHA-256
   digest, so signing a 10&nbsp;GB image never loads it into memory.
-- 🧹 **Defensive hygiene** — secret material is wiped with `OPENSSL_cleanse`;
-  key files are written `0600`.
+- 🧹 **Defensive hygiene** — secret material is `mlock`ed against swap and wiped
+  with `OPENSSL_cleanse`; key files are written `0600` and **crash-safely**
+  (staged to a temp file, `fsync`ed, then atomically renamed).
 
 ---
 
@@ -278,14 +281,18 @@ pq-sign/
 ├── setup-liboqs.sh     fetches + builds a minimal liboqs into ./.local
 ├── .gitignore
 ├── include/
-│   └── pqsign.h        shared declarations
+│   ├── pqsign.h            shared declarations
+│   └── keyfile_internal.h  pure parse/decrypt seams (fuzzed & unit-tested)
 ├── src/
 │   ├── main.c          CLI dispatch: keygen / sign / verify / list
 │   ├── keyfile.c       armored key containers + Argon2id/AES-256-GCM at rest
 │   ├── sigfile.c       self-describing binary signature container
-│   └── util.c          secure memory, RNG, streaming SHA-256, base64, prompts
-└── tests/
-    └── run.sh          end-to-end suite (keygen/sign/verify + tamper checks)
+│   └── util.c          secure memory, atomic writes, SHA-256, base64, prompts
+├── tests/
+│   ├── run.sh          end-to-end suite (keygen/sign/verify + tamper checks)
+│   ├── kat/kat.c       known-answer + unit tests for the deterministic core
+│   └── fuzz/           libFuzzer targets for the untrusted-input parsers
+└── .github/workflows/  CI: build, ASan/UBSan tests, fuzz smoke
 ```
 
 ---
@@ -297,6 +304,7 @@ pq-sign/
 ```
 -----BEGIN PQSIGN SECRET KEY-----
 Alg: ML-DSA-65
+Pub: <base64 public key>
 Cipher: AES-256-GCM
 KDF: Argon2id t=3 m=65536 p=1
 Salt: dQ/OVSgJ8n9hYYjwaKOCLA==
@@ -307,34 +315,83 @@ Tag: jxCgUllJdwJd2I6yDnqGcg==
 -----END PQSIGN SECRET KEY-----
 ```
 
+The secret-key file embeds its matching public key in the `Pub:` header so
+signing can always bind the signer fingerprint without a companion file. For
+encrypted keys that public key (and the algorithm) are fed in as AEAD, so
+neither can be swapped without failing the GCM tag.
+
 **Signatures** are a compact binary container:
 
 ```
 magic "PQSIGN" │ ver │ alg name │ SHA-256(pubkey) │ signature
 ```
 
-The embedded key fingerprint lets `verify` reject a signature made for a
-different key before it even runs the verification.
+Every v1.0 signature carries the signer fingerprint, and `verify` checks it
+(constant-time) before running the verification — so a signature made for a
+different key is rejected outright.
 
 ---
 
 ## 🧪 Testing
 
 ```sh
-make check    # keygen/sign/verify across schemes + tamper & wrong-key tests
+make check    # KAT/unit suite + keygen/sign/verify/tamper across schemes
+make asan     # the same suite under AddressSanitizer + UBSan
+make fuzz     # build libFuzzer targets (needs clang):
+              #   ./fuzz_sigfile -max_total_time=60
+              #   ./fuzz_keyarmor -max_total_time=60
 ```
+
+- **`tests/kat/`** — known-answer vectors for the deterministic core: SHA-256,
+  the strict base64 codec (incl. malformed-input rejection), the Argon2id KDF
+  as parameterised here, the domain-separated signed-message construction, the
+  signature container, and the key-armor parse/decrypt path with AEAD tamper
+  detection.
+- **`tests/fuzz/`** — the two parsers that consume attacker-controlled bytes
+  (`sigfile_parse`, `key_armor_parse`) are split into pure, never-aborting
+  functions and fuzzed under ASan/UBSan.
+- **CI** builds, runs the suite under sanitizers, and runs a short fuzz smoke
+  on every push.
+
+Post-quantum signature correctness itself is delegated to liboqs (which ships
+its own known-answer tests); these suites cover *pq-sign's* wiring around it.
 
 ---
 
 ## 🔒 Security notes
 
+**What pq-sign defends.** A signature proves a file was vouched for by the
+holder of a specific secret key, and detects any later modification. Verifying
+needs only the public key; the secret key never leaves the machine.
+
 - Files are signed over `SHA-256("pq-sign/v1" ‖ SHA-256(file))`. The context
-  string is domain separation; bumping it invalidates old signatures.
-- The secret-key passphrase is read with terminal echo disabled, fed to
-  Argon2id, and wiped immediately. Wrong passphrases are caught by the GCM
-  authentication tag, not by guesswork.
-- `pq-sign` is young software implementing young standards. Review it before
-  trusting it with anything that matters.
+  string is domain separation; bumping it invalidates old signatures. (File
+  integrity is therefore bounded by SHA-256's collision resistance — a
+  deliberate trade for streaming arbitrarily large files.)
+- Every signature is **bound to its signer**: the secret key embeds its public
+  key, so `verify` rejects a signature presented under the wrong key with a
+  constant-time fingerprint check before running the verification.
+- Secret keys at rest are encrypted with **Argon2id → AES-256-GCM**, with the
+  algorithm and public key bound in as AEAD. The passphrase is read with
+  terminal echo disabled, fed to Argon2id, and wiped immediately; a wrong
+  passphrase is caught by the GCM tag, not by guesswork.
+- In-memory secrets are `mlock`ed against swap and wiped with `OPENSSL_cleanse`;
+  key files are written `0600` and crash-safely (temp + `fsync` + `rename`).
+
+**Limits — read before trusting this with anything that matters.**
+
+- 🧪 **It builds on liboqs, which is research-grade and not independently
+  audited.** No amount of hardening in *this* code changes that. Treat the
+  whole stack as not-yet-production until liboqs matures and an independent
+  cryptographic audit of pq-sign has been done.
+- The PQ standards themselves (FIPS 204/205, finalised 2024) are young and have
+  seen far less cryptanalysis than RSA/ECDSA.
+- `mlock` is best-effort: small stack values and the `getline` passphrase
+  buffer are wiped but not locked, and a constrained `RLIMIT_MEMLOCK` downgrades
+  the guarantee (pq-sign warns once when this happens).
+- pq-sign does **not** establish *who* a key belongs to. Verifying a signature
+  tells you the file was signed by a given key fingerprint — establishing that
+  the fingerprint is really Alice's is out of scope (no web of trust, no PKI).
 
 ---
 
