@@ -279,7 +279,6 @@ pq-sign/
 ├── LICENSE             MIT
 ├── Makefile            pkg-config driven build (liboqs · openssl · libargon2)
 ├── setup-liboqs.sh     fetches + builds a minimal liboqs into ./.local
-├── .gitignore
 ├── include/
 │   ├── pqsign.h            shared declarations
 │   └── keyfile_internal.h  pure parse/decrypt seams (fuzzed & unit-tested)
@@ -292,7 +291,6 @@ pq-sign/
 │   ├── run.sh          end-to-end suite (keygen/sign/verify + tamper checks)
 │   ├── kat/kat.c       known-answer + unit tests for the deterministic core
 │   └── fuzz/           libFuzzer targets for the untrusted-input parsers
-└── .github/workflows/  CI: build, ASan/UBSan tests, fuzz smoke
 ```
 
 ---
