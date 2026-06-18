@@ -17,7 +17,7 @@ Sign and verify files with NIST's post-quantum signature standards —
 **ML-DSA** (FIPS&nbsp;204, Dilithium) and **SLH-DSA** (FIPS&nbsp;205, SPHINCS+) —
 with secret keys protected at rest by **Argon2id&nbsp;+&nbsp;AES-256-GCM**.
 
-[Why](#-why) · [Demo](#-demo) · [Install](#-install) · [Usage](#-usage) · [Algorithms](#-algorithms) · [File formats](#-file-formats) · [Security](#-security-notes)
+[Why](#-why) · [Demo](#-demo) · [Install](#-install) · [Usage](#-usage) · [GUI](#-gui) · [Algorithms](#-algorithms) · [File formats](#-file-formats) · [Security](#-security-notes)
 
 </div>
 
@@ -88,24 +88,30 @@ $ echo $?
 | **OpenSSL ≥ 3.0** | SHA-256, AES-256-GCM, CSPRNG | distro package |
 | **libargon2** | Argon2id key derivation | distro package |
 | **liboqs** | ML-DSA / SLH-DSA signatures | built from source (below) |
+| **GTK 3** *(optional)* | the `pq-sign-gui` desktop front-end | distro package |
 
 ### 1. Install the system packages
 
 OpenSSL and Argon2 are packaged everywhere; you also need a compiler,
-`pkg-config`, and (to build liboqs) `git`, `cmake`, and `ninja`.
+`pkg-config`, and (to build liboqs) `git`, `cmake`, and `ninja`. To build the
+optional GTK3 GUI, add the GTK 3 development package (`libgtk-3-dev` /
+`gtk3-devel` / `gtk3`).
 
 ```sh
 # Debian / Ubuntu
 sudo apt install build-essential pkg-config git cmake ninja-build \
-                 libssl-dev libargon2-dev
+                 libssl-dev libargon2-dev libgtk-3-dev
 
 # Fedora
 sudo dnf install gcc make pkgconf-pkg-config git cmake ninja-build \
-                 openssl-devel libargon2-devel
+                 openssl-devel libargon2-devel gtk3-devel
 
 # Arch
-sudo pacman -S base-devel pkgconf git cmake ninja openssl argon2
+sudo pacman -S base-devel pkgconf git cmake ninja openssl argon2 gtk3
 ```
+
+> The GTK 3 package is only needed for the desktop GUI. Leave it out and the
+> build quietly skips `pq-sign-gui` and installs just the CLI.
 
 ### 2. Install liboqs globally (recommended)
 
@@ -160,12 +166,25 @@ This installs:
 With liboqs installed globally, this is all it takes:
 
 ```sh
-make             # builds the ./pq-sign binary
+make             # builds ./pq-sign (and ./pq-sign-gui if GTK 3 is present)
 make check       # (optional) run the end-to-end test suite
-sudo make install   # (optional) install to /usr/local/bin
+sudo make install   # (optional) install system-wide (see below)
 ```
 
 That's it — run `pq-sign list` to confirm.
+
+`sudo make install` installs into `/usr/local` by default:
+
+```
+/usr/local/bin/pq-sign                                   the CLI
+/usr/local/bin/pq-sign-gui                               the GTK3 GUI   (if built)
+/usr/local/share/applications/pq-sign.desktop            launcher entry (if built)
+/usr/local/share/icons/hicolor/scalable/apps/pq-sign.svg the app icon   (if built)
+```
+
+After this, **PQ-Sign** appears in your application menu and its icon shows in
+the window title bar / taskbar. `sudo make uninstall` removes everything listed
+above. Override the location with `PREFIX`, e.g. `sudo make install PREFIX=/usr`.
 
 ---
 
@@ -249,6 +268,55 @@ VERIFY OK: 'report.pdf'
 
 ---
 
+## 🖥️ GUI
+
+Prefer clicking to typing? The optional **GTK3 front-end** wraps the same engine
+in a small desktop app — handy for signing **one or many files at once**.
+
+<div align="center">
+
+<!-- Take a screenshot of pq-sign-gui and save it as screenshot.png in the
+     repo root; it will render here. -->
+<img src="screenshot.png" width="560" alt="pq-sign-gui — the GTK3 front-end">
+
+</div>
+
+### Launch it
+
+After `sudo make install`, open **PQ-Sign** from your application menu, or run:
+
+```sh
+pq-sign-gui
+```
+
+(Before installing, you can run it straight from the build tree with
+`./pq-sign-gui`.)
+
+### Sign one or more files
+
+1. Open the **Sign** tab.
+2. Pick your secret key (the `.key` file) with **Secret key**.
+3. Click **Add files…** to queue one file or select several at once. Repeat to
+   add more; use **Remove selected** / **Clear** to prune the list.
+4. Click **Sign all**. A `<file>.sig` is written next to each input file.
+
+If the secret key is encrypted, the GUI asks for the passphrase **once** and
+reuses it for the whole batch. The status line reports how many files were
+signed and flags any that failed.
+
+### Verify
+
+1. Open the **Verify** tab.
+2. Choose the signer's public key (`.pub`) and the file to check.
+3. Leave **Signature** blank to use `<file>.sig`, or point it at a specific
+   `.sig`. Click **Verify** — the result shows the algorithm and signer
+   fingerprint on success, or a clear failure message.
+
+The GUI produces and reads the exact same `.sig` files as the CLI, so the two
+are fully interchangeable.
+
+---
+
 ## 🔢 Algorithms
 
 Run `pq-sign list` to see which schemes your liboqs build enabled:
@@ -277,13 +345,17 @@ Everything needed to build and run lives in the repository:
 pq-sign/
 ├── README.md           this file
 ├── LICENSE             MIT
-├── Makefile            pkg-config driven build (liboqs · openssl · libargon2)
+├── Makefile            pkg-config driven build (liboqs · openssl · libargon2 · gtk3)
 ├── setup-liboqs.sh     fetches + builds a minimal liboqs into ./.local
+├── data/
+│   ├── pq-sign.desktop application-menu launcher entry
+│   └── pq-sign.svg     application icon (scalable)
 ├── include/
 │   ├── pqsign.h            shared declarations
 │   └── keyfile_internal.h  pure parse/decrypt seams (fuzzed & unit-tested)
 ├── src/
 │   ├── main.c          CLI dispatch: keygen / sign / verify / list
+│   ├── gui.c           optional GTK3 front-end (pq-sign-gui)
 │   ├── keyfile.c       armored key containers + Argon2id/AES-256-GCM at rest
 │   ├── sigfile.c       self-describing binary signature container
 │   └── util.c          secure memory, atomic writes, SHA-256, base64, prompts
