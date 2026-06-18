@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a6ea5"/>
+      <stop offset="1" stop-color="#1f3b5c"/>
+    </linearGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f5d76e"/>
+      <stop offset="1" stop-color="#d4a017"/>
+    </linearGradient>
+  </defs>
+
+  <!-- shield body -->
+  <path d="M64 6 L112 24 V62 C112 92 92 112 64 122 C36 112 16 92 16 62 V24 Z"
+        fill="url(#shield)" stroke="#10243b" stroke-width="3"/>
+
+  <!-- padlock shackle -->
+  <path d="M50 56 V46 a14 14 0 0 1 28 0 V56"
+        fill="none" stroke="url(#metal)" stroke-width="7" stroke-linecap="round"/>
+
+  <!-- padlock body -->
+  <rect x="42" y="56" width="44" height="36" rx="6" fill="url(#metal)"
+        stroke="#8a6d0d" stroke-width="2"/>
+
+  <!-- PQ lettering -->
+  <text x="64" y="82" font-family="DejaVu Sans, Verdana, sans-serif"
+        font-size="22" font-weight="bold" text-anchor="middle"
+        fill="#1f3b5c">PQ</text>
+</svg>
