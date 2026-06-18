@@ -292,6 +292,20 @@ pq-sign-gui
 (Before installing, you can run it straight from the build tree with
 `./pq-sign-gui`.)
 
+The window has three tabs — **Keys**, **Sign**, and **Verify** — covering
+everything the CLI does.
+
+### Generate a keypair
+
+1. Open the **Keys** tab.
+2. Pick a **signature algorithm** from the drop-down (it lists every scheme
+   your liboqs build enabled, with its security level).
+3. Optionally tick **Encrypt the secret key with a passphrase** — you'll be
+   asked to set and confirm it.
+4. Click **Generate keypair…** and choose where to save. This writes
+   `<name>.pub` (share it) and `<name>.key` (keep it secret); the status line
+   shows the key fingerprint.
+
 ### Sign one or more files
 
 1. Open the **Sign** tab.
