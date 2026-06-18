@@ -23,11 +23,27 @@
 /* Must match the CLI's DS_CONTEXT in main.c. */
 static const char DS_CONTEXT[] = "pq-sign/v1";
 
+/* User-facing alias -> canonical liboqs identifier, mirroring main.c. */
+struct alg_alias { const char *alias; const char *canonical; const char *note; };
+static const struct alg_alias ALIASES[] = {
+    { "ml-dsa-44",   "ML-DSA-44",                 "lattice, NIST level 2" },
+    { "ml-dsa-65",   "ML-DSA-65",                 "lattice, NIST level 3 (default)" },
+    { "ml-dsa-87",   "ML-DSA-87",                 "lattice, NIST level 5" },
+    { "slh-dsa-128f", "SPHINCS+-SHA2-128f-simple", "hash-based, level 1" },
+    { "slh-dsa-192f", "SPHINCS+-SHA2-192f-simple", "hash-based, level 3" },
+    { "slh-dsa-256f", "SPHINCS+-SHA2-256f-simple", "hash-based, level 5" },
+    { NULL, NULL, NULL }
+};
+
 /* ------------------------------------------------------------------ *
  *  Shared application state
  * ------------------------------------------------------------------ */
 typedef struct {
     GtkWidget    *window;
+    /* keys tab */
+    GtkWidget    *alg_combo;       /* GtkComboBoxText: alias -> canonical */
+    GtkWidget    *encrypt_check;
+    GtkWidget    *keygen_status;
     /* sign tab */
     GtkWidget    *key_chooser;     /* GtkFileChooserButton for .key      */
     GtkListStore *files_store;     /* queued files to sign               */
@@ -93,6 +109,63 @@ static char *ask_passphrase(GtkWindow *parent, const char *keyname)
     }
     /* Best-effort wipe of the entry buffer before destroying. */
     gtk_entry_set_text(GTK_ENTRY(entry), "");
+    gtk_widget_destroy(d);
+    return pass;
+}
+
+/* Modal "set a new passphrase" prompt with confirmation. Loops until the two
+ * entries match (and are non-empty) or the user cancels. Returns a newly
+ * allocated string (caller frees) or NULL on cancel. */
+static char *ask_new_passphrase(GtkWindow *parent)
+{
+    GtkWidget *d = gtk_dialog_new_with_buttons("Set key passphrase", parent,
+        GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+        "_Cancel", GTK_RESPONSE_CANCEL,
+        "_OK", GTK_RESPONSE_OK, NULL);
+    gtk_dialog_set_default_response(GTK_DIALOG(d), GTK_RESPONSE_OK);
+
+    GtkWidget *box = gtk_dialog_get_content_area(GTK_DIALOG(d));
+    gtk_container_set_border_width(GTK_CONTAINER(box), 12);
+    gtk_box_set_spacing(GTK_BOX(box), 6);
+
+    GtkWidget *l1 = gtk_label_new("Passphrase for the new secret key:");
+    gtk_widget_set_halign(l1, GTK_ALIGN_START);
+    GtkWidget *e1 = gtk_entry_new();
+    gtk_entry_set_visibility(GTK_ENTRY(e1), FALSE);
+    gtk_entry_set_input_purpose(GTK_ENTRY(e1), GTK_INPUT_PURPOSE_PASSWORD);
+    gtk_entry_set_activates_default(GTK_ENTRY(e1), TRUE);
+
+    GtkWidget *l2 = gtk_label_new("Confirm passphrase:");
+    gtk_widget_set_halign(l2, GTK_ALIGN_START);
+    GtkWidget *e2 = gtk_entry_new();
+    gtk_entry_set_visibility(GTK_ENTRY(e2), FALSE);
+    gtk_entry_set_input_purpose(GTK_ENTRY(e2), GTK_INPUT_PURPOSE_PASSWORD);
+    gtk_entry_set_activates_default(GTK_ENTRY(e2), TRUE);
+
+    gtk_container_add(GTK_CONTAINER(box), l1);
+    gtk_container_add(GTK_CONTAINER(box), e1);
+    gtk_container_add(GTK_CONTAINER(box), l2);
+    gtk_container_add(GTK_CONTAINER(box), e2);
+    gtk_widget_show_all(d);
+
+    char *pass = NULL;
+    while (gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_OK) {
+        const char *p1 = gtk_entry_get_text(GTK_ENTRY(e1));
+        const char *p2 = gtk_entry_get_text(GTK_ENTRY(e2));
+        if (p1[0] == '\0') {
+            show_error(GTK_WINDOW(d), "Passphrase cannot be empty.");
+            continue;
+        }
+        if (strcmp(p1, p2) != 0) {
+            show_error(GTK_WINDOW(d), "Passphrases do not match — try again.");
+            gtk_entry_set_text(GTK_ENTRY(e2), "");
+            continue;
+        }
+        pass = g_strdup(p1);
+        break;
+    }
+    gtk_entry_set_text(GTK_ENTRY(e1), "");
+    gtk_entry_set_text(GTK_ENTRY(e2), "");
     gtk_widget_destroy(d);
     return pass;
 }
@@ -481,6 +554,164 @@ done:
 }
 
 /* ------------------------------------------------------------------ *
+ *  Keys tab: generate a keypair (mirrors `pq-sign keygen`)
+ * ------------------------------------------------------------------ */
+static void on_keygen(GtkButton *btn, gpointer data)
+{
+    (void)btn;
+    App *app = data;
+    GtkWindow *win = GTK_WINDOW(app->window);
+
+    /* Selected algorithm: the combo's active id holds the canonical name. */
+    const char *canon =
+        gtk_combo_box_get_active_id(GTK_COMBO_BOX(app->alg_combo));
+    if (!canon) {
+        show_error(win, "Choose a signature algorithm.");
+        return;
+    }
+    if (!OQS_SIG_alg_is_enabled(canon)) {
+        show_error(win, "Algorithm '%s' is not enabled in this liboqs build.",
+                   canon);
+        return;
+    }
+
+    gboolean encrypt = gtk_toggle_button_get_active(
+        GTK_TOGGLE_BUTTON(app->encrypt_check));
+
+    /* Ask where to save: the chosen path is the basename; .pub/.key are
+     * derived from it (matching the CLI's --out). */
+    GtkWidget *dlg = gtk_file_chooser_dialog_new("Save keypair as…", win,
+        GTK_FILE_CHOOSER_ACTION_SAVE,
+        "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, NULL);
+    gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dlg), TRUE);
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dlg), "mykey");
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) != GTK_RESPONSE_ACCEPT) {
+        gtk_widget_destroy(dlg);
+        return;
+    }
+    char *base = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+    gtk_widget_destroy(dlg);
+    if (!base)
+        return;
+
+    /* Generate the keypair. */
+    OQS_SIG *sig = OQS_SIG_new(canon);
+    if (!sig) {
+        show_error(win, "Failed to initialise %s.", canon);
+        g_free(base);
+        return;
+    }
+    uint8_t *pub = xmalloc(sig->length_public_key);
+    uint8_t *sec = secure_alloc(sig->length_secret_key);
+    if (OQS_SIG_keypair(sig, pub, sec) != OQS_SUCCESS) {
+        show_error(win, "Key generation failed.");
+        secure_free(sec, sig->length_secret_key);
+        free(pub);
+        OQS_SIG_free(sig);
+        g_free(base);
+        return;
+    }
+
+    char *pass = NULL;
+    if (encrypt) {
+        pass = ask_new_passphrase(win);
+        if (!pass) {            /* cancelled — discard generated material */
+            secure_free(sec, sig->length_secret_key);
+            free(pub);
+            OQS_SIG_free(sig);
+            g_free(base);
+            return;
+        }
+    }
+
+    char *pubpath = g_strdup_printf("%s.pub", base);
+    char *secpath = g_strdup_printf("%s.key", base);
+    key_write_public(pubpath, canon, pub, sig->length_public_key);
+    key_write_secret(secpath, canon, sec, sig->length_secret_key,
+                     pub, sig->length_public_key, pass);
+
+    uint8_t fpr[32];
+    char fprhex[65];
+    sha256(pub, sig->length_public_key, fpr);
+    to_hex(fpr, 32, fprhex);
+
+    char *summary = g_strdup_printf(
+        "Generated %s keypair\n"
+        "public key:  %s\n"
+        "secret key:  %s%s\n"
+        "fingerprint: %.16s",
+        canon, pubpath, secpath,
+        encrypt ? "  (encrypted)" : "", fprhex);
+    gtk_label_set_text(GTK_LABEL(app->keygen_status), summary);
+    g_free(summary);
+
+    if (pass) {
+        memset(pass, 0, strlen(pass));
+        g_free(pass);
+    }
+    g_free(pubpath);
+    g_free(secpath);
+    secure_free(sec, sig->length_secret_key);
+    free(pub);
+    OQS_SIG_free(sig);
+    g_free(base);
+}
+
+static GtkWidget *build_keys_tab(App *app)
+{
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(box), 12);
+
+    GtkWidget *intro = gtk_label_new(
+        "Generate a new keypair. The public key (.pub) can be shared; the "
+        "secret key (.key) signs your files — keep it private.");
+    gtk_label_set_line_wrap(GTK_LABEL(intro), TRUE);
+    gtk_widget_set_halign(intro, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(box), intro, FALSE, FALSE, 0);
+
+    /* Algorithm chooser, populated with the schemes this liboqs enabled. */
+    GtkWidget *algrow = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *alglbl = gtk_label_new("Algorithm:");
+    gtk_widget_set_size_request(alglbl, 90, -1);
+    gtk_widget_set_halign(alglbl, GTK_ALIGN_START);
+    app->alg_combo = gtk_combo_box_text_new();
+    for (const struct alg_alias *a = ALIASES; a->alias; a++) {
+        if (!OQS_SIG_alg_is_enabled(a->canonical))
+            continue;
+        char *label = g_strdup_printf("%s — %s", a->alias, a->note);
+        gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(app->alg_combo),
+                                  a->canonical, label);
+        g_free(label);
+    }
+    /* Default to ML-DSA-65 if available, else the first entry. */
+    if (!gtk_combo_box_set_active_id(GTK_COMBO_BOX(app->alg_combo),
+                                     PQSIGN_DEFAULT_ALG))
+        gtk_combo_box_set_active(GTK_COMBO_BOX(app->alg_combo), 0);
+    gtk_box_pack_start(GTK_BOX(algrow), alglbl, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(algrow), app->alg_combo, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(box), algrow, FALSE, FALSE, 0);
+
+    app->encrypt_check = gtk_check_button_new_with_label(
+        "Encrypt the secret key with a passphrase (Argon2id + AES-256-GCM)");
+    gtk_box_pack_start(GTK_BOX(box), app->encrypt_check, FALSE, FALSE, 0);
+
+    GtkWidget *gen = gtk_button_new_with_label("Generate keypair…");
+    gtk_style_context_add_class(gtk_widget_get_style_context(gen),
+                                "suggested-action");
+    g_signal_connect(gen, "clicked", G_CALLBACK(on_keygen), app);
+    gtk_box_pack_start(GTK_BOX(box), gen, FALSE, FALSE, 0);
+
+    app->keygen_status = gtk_label_new(
+        "Pick an algorithm, then Generate keypair to choose where to save.");
+    gtk_label_set_line_wrap(GTK_LABEL(app->keygen_status), TRUE);
+    gtk_label_set_selectable(GTK_LABEL(app->keygen_status), TRUE);
+    gtk_widget_set_halign(app->keygen_status, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(box), app->keygen_status, FALSE, FALSE, 0);
+
+    return box;
+}
+
+/* ------------------------------------------------------------------ *
  *  UI construction
  * ------------------------------------------------------------------ */
 static GtkWidget *build_sign_tab(App *app)
@@ -595,17 +826,64 @@ static GtkWidget *build_verify_tab(App *app)
     return box;
 }
 
+static void on_about(GtkButton *btn, gpointer data)
+{
+    App *app = data;
+    const char *authors[] = { "Jean-Francois Lachance-Caumartin", NULL };
+    const char *features =
+        "Sign and verify files with NIST's post-quantum signature "
+        "standards — ML-DSA (FIPS 204) and SLH-DSA (FIPS 205).\n"
+        "\n"
+        "• Sign one file or many at once, with detached .sig output\n"
+        "• Verify signatures, with signer-fingerprint binding\n"
+        "• Encrypted secret keys (Argon2id + AES-256-GCM), unlocked once\n"
+        "• Streaming SHA-256 hashing — signs files of any size\n"
+        "• Self-describing signatures, interchangeable with the CLI";
+
+    gtk_show_about_dialog(GTK_WINDOW(app->window),
+        "program-name", "PQ-Sign",
+        "version", PQSIGN_VERSION,
+        "comments", features,
+        "authors", authors,
+        "copyright", "© 2026 Jean-Francois Lachance-Caumartin",
+        "license-type", GTK_LICENSE_MIT_X11,
+        "logo-icon-name", "pq-sign",
+        NULL);
+    (void)btn;
+}
+
 static void activate(GtkApplication *gapp, gpointer data)
 {
     App *app = data;
     app->window = gtk_application_window_new(gapp);
     gtk_window_set_title(GTK_WINDOW(app->window), "PQ-Sign");
     gtk_window_set_default_size(GTK_WINDOW(app->window), 560, 460);
+    gtk_window_set_position(GTK_WINDOW(app->window), GTK_WIN_POS_CENTER);
     /* Matches the installed hicolor icon + .desktop Icon= so the window
      * manager / taskbar shows our icon. */
     gtk_window_set_icon_name(GTK_WINDOW(app->window), "pq-sign");
 
+    /* Let the icon be found when running uninstalled from the build tree
+     * (./pq-sign-gui before `make install`). Needs a screen, so it happens
+     * here rather than in main(). Harmless if the data/ dir is absent. */
+    GdkScreen *screen = gtk_widget_get_screen(app->window);
+    if (screen) {
+        GtkIconTheme *theme = gtk_icon_theme_get_for_screen(screen);
+        if (theme) gtk_icon_theme_append_search_path(theme, "data");
+    }
+
+    /* Header bar carries the title and an About button. */
+    GtkWidget *header = gtk_header_bar_new();
+    gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(header), TRUE);
+    gtk_header_bar_set_title(GTK_HEADER_BAR(header), "PQ-Sign");
+    GtkWidget *about = gtk_button_new_with_label("About");
+    g_signal_connect(about, "clicked", G_CALLBACK(on_about), app);
+    gtk_header_bar_pack_end(GTK_HEADER_BAR(header), about);
+    gtk_window_set_titlebar(GTK_WINDOW(app->window), header);
+
     GtkWidget *nb = gtk_notebook_new();
+    gtk_notebook_append_page(GTK_NOTEBOOK(nb), build_keys_tab(app),
+                             gtk_label_new("Keys"));
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), build_sign_tab(app),
                              gtk_label_new("Sign"));
     gtk_notebook_append_page(GTK_NOTEBOOK(nb), build_verify_tab(app),
@@ -616,11 +894,6 @@ static void activate(GtkApplication *gapp, gpointer data)
 
 int main(int argc, char **argv)
 {
-    /* Make our icon discoverable when running uninstalled from the build
-     * tree (e.g. ./pq-sign-gui before `make install`). Harmless if absent. */
-    GtkIconTheme *theme = gtk_icon_theme_get_default();
-    if (theme) gtk_icon_theme_append_search_path(theme, "data");
-
     App app;
     memset(&app, 0, sizeof app);
 
