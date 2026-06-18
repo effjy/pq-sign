@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=PQ-Sign
+GenericName=Post-Quantum File Signer
+Comment=Sign and verify files with ML-DSA / SLH-DSA post-quantum signatures
+Exec=pq-sign-gui %F
+Icon=pq-sign
+Terminal=false
+Categories=Utility;Security;
+MimeType=application/octet-stream;
+Keywords=sign;signature;crypto;post-quantum;verify;
+StartupNotify=true
+StartupWMClass=pq-sign-gui
